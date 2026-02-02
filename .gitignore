@@ -16,8 +16,5 @@ profiles/
 ingest_errors.log
 ingest_warnings.log
 Dockerfile.test
-Dockerfile
-docker-compose.yml
-src/Amani_AML_Project.egg-info
 
 

@@ -1,0 +1,26 @@
+services:
+  # Service 1: The API Server (Long-running)
+  api:
+    build: .
+    container_name: aml_api
+    command: uvicorn sanction_parser.api.app:app --host 0.0.0.0 --port 8000
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./data:/app/data  # Persist data locally
+      - ./services:/app/services # Optional: Hot reload logic if needed
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Service 2: The Orchestrator Pipeline (Runs on demand)
+  pipeline:
+    build: .
+    container_name: aml_pipeline
+    command: python main.py
+    volumes:
+      - ./data:/app/data  # Writes to the same folder the API reads from
+    profiles: ["tools"]   # Keeps this service from auto-starting with 'up'

@@ -1,0 +1,49 @@
+# =========================
+# Version Control
+# =========================
+.git
+.gitignore
+
+# =========================
+# Python Artifacts
+# =========================
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+
+# =========================
+# Virtual Environments
+# =========================
+.venv/
+env/
+venv/
+
+# =========================
+# OS / Editor Noise
+# =========================
+.DS_Store
+Thumbs.db
+.vscode/
+
+# =========================
+# Runtime Data (Volumes)
+# =========================
+data/
+data_lake/
+logs/
+
+# =========================
+# Project-Specific
+# =========================
+src/amani_aml/data/
+schema/
+
+# =========================
+# Docs / Local Files
+# =========================
+*.log
+*.sqlite
+*.db

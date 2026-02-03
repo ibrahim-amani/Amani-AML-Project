@@ -16,9 +16,8 @@ aml = "amani_aml.cli:main"
 package = true
 
 [tool.uv.sources]
-adverse-media-parser = { path = "dists/adverse_media_parser-0.1.0-py3-none-any.whl" }
-sanction-pep-parser = { path = "dists/sanction_pep_parser-0.1.0-py3-none-any.whl" }
-
+sanction-pep-parser = { git = "ssh://git@github.com/kaan-amani/sanction-pep-parser.git", tag = "v0.0.1" }
+adverse-media-parser = { git = "ssh://git@github.com/kaan-amani/adverse-media-parser.git", tag = "v0.0.1" }
 [build-system]
 requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"

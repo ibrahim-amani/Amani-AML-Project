@@ -38,6 +38,12 @@ From the project root:
 uv sync
 ```
 
+##  Install & Update `PlayWright`
+
+```bash
+playwright install
+```
+
 ### Run without `uv run` (recommended)
 
 Activate the environment:

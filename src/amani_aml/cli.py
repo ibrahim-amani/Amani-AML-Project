@@ -23,7 +23,7 @@ if TYPE_CHECKING:
 
 # --- CONFIG (Lightweight) ---
 # We assume settings is light. If config.py is heavy, move this inside functions too.
-from .config import settings
+from .core.config import settings
 
 # --- UI INIT ---
 console = Console()
@@ -92,11 +92,11 @@ async def orchestrate_pipeline(
     Phase 2 (sequential): resolver
     """
     # 💤 LAZY IMPORTS: Load heavy libraries only when pipeline starts
-    from .config import setup_logging
-    from .services.sanctions_svc import SanctionsScraperService
-    from .services.media_svc import AdverseMediaService
-    from .services.resolver_svc import ResolverService
-    from sanction_parser.core.config import set_data_lake_path, settings as lib_settings
+    from amani_aml.core.config import setup_logging
+    from amani_aml.services.sanctions_svc import SanctionsScraperService
+    from amani_aml.services.media_svc import AdverseMediaService
+    from amani_aml.services.resolver_svc import ResolverService
+    from amani_aml.core.config import set_data_lake_path, settings as lib_settings
 
     # Initialize Logging only now
     setup_logging()
@@ -112,12 +112,11 @@ async def orchestrate_pipeline(
     orch_logger = logging.getLogger("Orchestrator")
 
     # Ensure sanction_parser library uses your configured data path
-    set_data_lake_path(settings.DATA_PATH)
+    set_data_lake_path(settings.DATA_LAKE_DIR)
 
     start_ts = time.time()
     orch_logger.info("=== STARTING JOINT AML OPERATIONS ===")
-    orch_logger.info(f"DATA_PATH (project): {settings.DATA_PATH}")
-    orch_logger.info(f"DATA_LAKE_DIR (library): {lib_settings.DATA_LAKE_DIR}")
+    orch_logger.info(f"DATA_LAKE_DIR: {lib_settings.DATA_LAKE_DIR}")
 
     # Init services
     sanctions_svc = SanctionsScraperService(concurrency_limit=parallel or settings.SANCTIONS_CONCURRENCY)
@@ -295,7 +294,7 @@ def pipeline_run(
         f"[bold]Media:[/] {'OFF' if no_media else 'ON'}\n"
         f"[bold]Resolve:[/] {'OFF' if no_resolve else 'ON'}\n"
         f"[bold]Parallel:[/] {parallel or settings.SANCTIONS_CONCURRENCY}\n"
-        f"[bold]DATA_PATH:[/] {settings.DATA_PATH}",
+        f"[bold]DATA_LAKE_DIR:[/] {settings.DATA_LAKE_DIR}",
     )
     asyncio.run(
         orchestrate_pipeline(
@@ -335,11 +334,11 @@ def api_run(
     """Start the FastAPI export service."""
     # 💤 LAZY IMPORT
     import uvicorn
-    from sanction_parser.core.config import set_data_lake_path, settings as lib_settings
+    from .core.config import set_data_lake_path, settings as lib_settings
     
     print_banner()
     # keep the data path consistent
-    set_data_lake_path(settings.DATA_PATH)
+    set_data_lake_path(settings.DATA_LAKE_DIR)
 
     console.print(
         Panel(

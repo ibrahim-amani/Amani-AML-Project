@@ -15,7 +15,7 @@ from amani_aml.core.config import settings
 
 app = FastAPI(
     title="AMANI AML API",
-    version="1.1.0",
+    version="0.1.0",
 )
 
 # -------------------------------------------------------------------

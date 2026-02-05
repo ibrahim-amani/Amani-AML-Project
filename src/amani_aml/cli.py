@@ -350,7 +350,7 @@ def api_run(
     )
 
     uvicorn.run(
-        "sanction_parser.api.app:app",
+        "amani_aml.api.app:app",
         host=host,
         port=port,
         reload=reload,

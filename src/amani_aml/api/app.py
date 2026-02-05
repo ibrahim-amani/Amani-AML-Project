@@ -14,7 +14,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from amani_aml.core.config import settings
 
 app = FastAPI(
-    title="Sanction PEP Parser Export API",
+    title="AMANI AML API",
     version="1.1.0",
 )
 

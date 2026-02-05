@@ -1,0 +1,29 @@
+[project]
+name = "Amani-AML-Project"
+version = "0.1.0"
+description = "AML orchestration pipeline + compliant export API"
+readme = "README.md"
+requires-python =  "==3.12.12"
+dependencies = [
+    "adverse-media-parser",
+    "sanction-pep-parser",
+]
+
+[project.scripts]
+aml = "amani_aml.cli:main"
+
+[tool.uv]
+package = true
+
+[tool.uv.sources]
+sanction-pep-parser = { git = "ssh://git@github.com/kaan-amani/sanction-pep-parser.git", tag = "v0.0.1" }
+adverse-media-parser = { git = "ssh://git@github.com/kaan-amani/adverse-media-parser.git", tag = "v0.0.1" }
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]

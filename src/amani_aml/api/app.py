@@ -171,63 +171,10 @@ def download_delta_export():
         },
     )
 
-
-# -------------------------------------------------------------------
-#  UPDATE ENDPOINT (used by _get_update_batch)
-# -------------------------------------------------------------------
-
-@app.get("/amani/update/{timestamp}")
-def get_updates_since(timestamp: str):
-    """
-    Incremental update endpoint.
-
-    If the client timestamp is older than the DELTA export timestamp,
-    return NEW + UPDATED profiles.
-    Otherwise, return empty updates.
-    """
-    try:
-        client_ts = int(timestamp)
-    except ValueError:
-        raise HTTPException(status_code=400, detail="Invalid timestamp")
-
-    _require_file(DELTA_META_FILE)
-
-    meta = _read_json(DELTA_META_FILE)
-
-    delta_ts = int(
-        datetime.fromisoformat(meta["exported_at_iso"])
-        .replace(tzinfo=timezone.utc)
-        .timestamp() * 1000
-    )
-
-    if client_ts >= delta_ts or meta["records"] == 0:
-        return JSONResponse(
-            {
-                "profiles": [],
-                "timestamp": delta_ts,
-                "mode": "DELTA",
-            }
-        )
-
-    # Return delta profiles
-    _require_file(DELTA_FILE)
-    profiles = _load_delta_profiles()
-
-    return JSONResponse(
-        {
-            "profiles": profiles,
-            "timestamp": delta_ts,
-            "mode": "DELTA",
-            "new_records": meta["new_records"],
-            "updated_records": meta["updated_records"],
-        }
-    )
-
-
 # -------------------------------------------------------------------
 # Health
 # -------------------------------------------------------------------
 
-@app.get("/health")
+@app.get("/")
 def health():
     return {"ok": True}

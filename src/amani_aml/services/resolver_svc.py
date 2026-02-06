@@ -1,8 +1,6 @@
 import asyncio
 import logging
-
-# --- External Library Import ---
-from sanction_parser.pipelines.resolver import EntityResolver
+from ..pipelines.resolver import EntityResolver
 
 class ResolverService:
     def __init__(self):

@@ -16,17 +16,16 @@ This project wraps and coordinates two engines:
 * **Phase 1 (Parallel)**
   Runs **Sanctions/PEP scrapers** and **Adverse Media screening** at the same time.
 * **Phase 2 (Sequential)**
-  Runs **Entity Resolution** to generate final merged (“Golden”) records.
+  Runs **Entity Resolution** to generate final merged (“Golden”) records (Full + Delta).
 
 
 
 ---
 
-## ✅ Requirements
+##  Requirements
 
-* Python **3.12+**
-* `uv` (recommended)
-* Windows / Linux supported
+* Python **3.12.12**
+* `uv` 
 
 ---
 
@@ -48,16 +47,8 @@ playwright install
 
 Activate the environment:
 
-**PowerShell**
-
-```powershell
-.\.venv\Scripts\Activate.ps1
-```
-
-Then you can run:
-
 ```bash
-aml --help
+.venv\scripts\activate
 ```
 
 ---
@@ -124,8 +115,8 @@ aml sources --help
 
 The orchestration sets the data lake path and prints it during execution:
 
-* Project path: `settings.DATA_PATH`
-* Underlying library path: `sanction_parser.core.config.settings.DATA_LAKE_DIR`
+* Project path: `settings.DATA_LAKE_DIR`
+* Underlying library path: `amani_aml.core.config.settings.DATA_LAKE_DIR`
 
 At the end of each run, the CLI prints:
 
@@ -137,21 +128,44 @@ At the end of each run, the CLI prints:
 ## Project Structure
 
 ```
-test_project/
-├─ dists/                           # Local wheels
-│  ├─ adverse_media_parser-*.whl
-│  └─ sanction_pep_parser-*.whl
-├─ src/
-│  └─ amani_aml/
-│     ├─ __init__.py
-│     ├─ cli.py                     # `aml` CLI
-│     ├─ config.py                  # settings + logging
-│     └─ services/
-│        ├─ sanctions_svc.py        # runs ScraperRegistry sources
-│        ├─ media_svc.py            # runs adverse media engine (thread-offloaded)
-│        └─ resolver_svc.py         # runs EntityResolver (thread-offloaded)
-├─ pyproject.toml
-└─ uv.lock
+Amani-AML-Project
+├── src/
+│   ├── amani_aml/                  # Main application package
+│   │   ├── api/                    # API layer (FastAPI)
+│   │   │   ├── __init__.py
+│   │   │   └── app.py              # API application entrypoint
+│   │   │
+│   │   ├── core/                   # Core application concerns
+│   │   │   └── config.py           # Configuration, settings, logging
+│   │   │
+│   │   ├── pipelines/              # Orchestrated processing pipelines
+│   │   │   ├── __init__.py
+│   │   │   └── resolver.py         # Entity resolution pipeline
+│   │   │
+│   │   ├── services/               # Business logic / domain services
+│   │   │   ├── __init__.py
+│   │   │   ├── media_svc.py        # Adverse media processing
+│   │   │   ├── resolver_svc.py     # Entity resolution service
+│   │   │   └── sanctions_svc.py    # Sanctions & PEP screening
+│   │   │
+│   │   ├── utils/                  # Shared utility functions
+│   │   │   ├── __init__.py
+│   │   │   └── nat_to_iso.py       # Nationality → ISO mapping
+│   │   │
+│   │   ├── cli.py                  # Command-line interface (`aml`)
+│   │   └── __init__.py
+│   │
+│   ├── __main__.py                 # Python module entrypoint
+│   └── __init__.py
+│
+├── Dockerfile                      # Application container image
+├── docker-compose.yml              # Local multi-service orchestration
+├── pyproject.toml                  # Project metadata & dependencies
+├── uv.lock                         # Locked dependency versions
+├── README.md                       # Project documentation
+├── .python-version                 # Python version pin
+├── .dockerignore
+└── .gitignore
 ```
 
 ---
@@ -160,14 +174,8 @@ test_project/
 
 Edit `src/amani_aml/config.py` to control:
 
-* `DATA_PATH`
-* `SANCTIONS_CONCURRENCY`
-* Logging level and format
-
-The CLI automatically calls:
-
-* `set_data_lake_path(settings.DATA_PATH)` to keep the library output aligned with your project data path.
-
+* `DATA_LAKE_DIR`
+* `SANCTIONS_CONCURRENCY
 ---
 
 ##  Quick Smoke Test
@@ -190,7 +198,7 @@ The API exposes Golden Records and provider endpoints.
 ### Start the API server
 
 ```bash
-uvicorn sanction_parser.api.app:app
+aml api
 ```
 
 Server runs at:
@@ -199,42 +207,19 @@ Server runs at:
 http://127.0.0.1:8000
 ```
 
-### Available endpoints
+### Available Endpoints
 
-| Endpoint                    | Description                     |
-| --------------------------- | ------------------------------- |
-| `/docs`                     | Swagger UI                      |
-| `/openapi.json`             | OpenAPI schema                  |
-| `/health`                   | Health check                    |
-| `/exports/meta`             | Golden export manifest          |
-| `/exports/golden`           | Download Golden_Export.jsonl.gz |
-| `/amani/meta`               | AmaniAI provider manifest       |
-| `/amani/file`               | AmaniAI export file             |
-| `/amani/update/{timestamp}` | AmaniAI delta updates           |
+| Endpoint                    | Description                                                            |
+| --------------------------- | ---------------------------------------------------------------------- |
+| /                         | Health check                                                           |
+| /amani/meta               | **FULL export manifest** (initial load metadata for Golden export)     |
+| /amani/file               | **FULL export file download** (Golden_Export.jsonl.gz)               |
+| /amani/delta/meta         | **DELTA export manifest** (new + updated records metadata)             |
+| /amani/delta/file         | **DELTA export file download** (Golden_Export.delta.jsonl.gz)        |
+
+---
 
 > These endpoints are used directly by the **AmaniAI provider**.
 
 ---
 
----
-
-## 🧾 Packaging / Entry Point
-
-This project is packaged to enable the `aml` command via:
-
-```toml
-[project.scripts]
-aml = "amani_aml.cli:main"
-```
-
-The `src/` layout is enabled using:
-
-```toml
-[tool.setuptools]
-package-dir = {"" = "src"}
-
-[tool.setuptools.packages.find]
-where = ["src"]
-```
-
----

@@ -12,6 +12,8 @@ class Settings(BaseSettings):
     PROJECT_NAME: str = "AML Project"
     PROVIDER_NAME:str="AmaniAI"
     
+    CONTRACT_VERSION:str="1.0"
+    SCEMA_VERSION:str="1.0"
     # ------------------------------------------------------------------
     # App Configuration (Moved from AppConfig)
     # ------------------------------------------------------------------

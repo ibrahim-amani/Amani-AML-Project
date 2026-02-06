@@ -1,11 +1,3 @@
-"""
-Docstring for src.sanction_parser.pipelines.resolver
-Entity Resolution engine for processed JSONL records.
-- Loads all *.jsonl / *.jsonl.gz from settings.PROCESSED_DIR (recursively)
-- Builds similarity graph using blocking + fuzzy rules
-- Splits clusters by DOB-years
-
-"""
 from __future__ import annotations
 
 import gzip
@@ -14,6 +6,7 @@ import json
 import logging
 import re
 import time
+from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
@@ -22,8 +15,8 @@ import networkx as nx
 from metaphone import doublemetaphone
 from rapidfuzz import fuzz
 
-from amani_aml.core.config import settings
-from amani_aml.utils.nat_to_iso import (
+from sanction_parser.core.config import settings
+from sanction_parser.scrapers.utils.nat_to_iso import (
     normalize_country_fields_in_profile,
     normalize_nationalities,
 )
@@ -37,25 +30,38 @@ class EntityResolver:
     - Loads all *.jsonl / *.jsonl.gz from settings.PROCESSED_DIR (recursively)
     - Builds similarity graph using blocking + fuzzy rules
     - Splits clusters by DOB-years
-    - Merges to golden profiles and saves JSONL.GZ + metadata
+    - Merges to golden profiles and saves FULL + DELTA exports
     """
+
+    STATE_VERSION = 1
 
     def __init__(
         self,
         processed_dir: Optional[Path] = None,
         output_dir: Optional[Path] = None,
-        output_file: str = "Golden_Export.jsonl",
         max_block_size: int = 500,
         debug_top_n_clusters: int = 20,
         provider: str = "AmaniAI",
+        # DELTA settings
+        enable_delta: bool = True,
+        state_file: Optional[str] = None,
+        # Hashing options
+        excluded_data_fields_for_hash: Optional[List[str]] = None,
+        excluded_top_fields_for_hash: Optional[List[str]] = None,
     ):
         self.processed_dir = Path(processed_dir) if processed_dir else settings.PROCESSED_DIR
         self.output_dir = Path(output_dir) if output_dir else (settings.DATA_LAKE_DIR / "new_data")
-        self.output_file = output_file
         self.max_block_size = max_block_size
         self.debug_top_n_clusters = debug_top_n_clusters
         self.provider = provider
-        self.state_file = self.output_dir / "resolution_state_hashes.json"
+
+        self.enable_delta = enable_delta
+        self.state_file = state_file or f"{self.provider}_state.json"
+
+        # Default exclusions: provider_version ,"evidences" ,"notes" changes every run
+        self.excluded_data_fields_for_hash = excluded_data_fields_for_hash or["provider_version" ,"evidences" ,"notes"]
+        # (Optional) exclude top-level volatile fields if you ever add any
+        self.excluded_top_fields_for_hash = excluded_top_fields_for_hash or []
 
     # ---------------------------------------------------------------------
     # Public entrypoint
@@ -64,6 +70,8 @@ class EntityResolver:
         logger.info("=== ROBUST ENTITY RESOLUTION ===")
         logger.info("Processed dir: %s", self.processed_dir)
         logger.info("Output dir: %s", self.output_dir)
+        logger.info("Provider: %s", self.provider)
+        logger.info("Enable DELTA: %s", self.enable_delta)
 
         all_profiles = self._load_all_profiles()
         logger.info("Loaded %d profiles.", len(all_profiles))
@@ -73,14 +81,23 @@ class EntityResolver:
             return
 
         graph = self._build_similarity_graph(all_profiles)
+
+        # -----------------------------
+        # Deterministic ordering
+        # -----------------------------
         clusters = list(nx.connected_components(graph))
+        clusters = sorted(clusters, key=lambda c: min(c) if c else 10**18)
+
         logger.info("Resolved into %d connected components (candidate entities).", len(clusters))
 
         merged_results: List[Dict[str, Any]] = []
         split_total = 0
 
         for component in clusters:
-            cluster_profiles = [all_profiles[i] for i in component]
+            # Deterministic ordering inside each component
+            idxs = sorted(component)
+            cluster_profiles = [all_profiles[i] for i in idxs]
+
             subclusters = self._split_cluster_by_dob(cluster_profiles)
             split_total += len(subclusters)
 
@@ -90,22 +107,21 @@ class EntityResolver:
         logger.info("After DOB-aware split: %d final entity clusters.", split_total)
 
         self._save_final_output(merged_results)
-        #self._debug_largest_clusters_with_split(all_profiles, clusters)
-        
+        # self._debug_largest_clusters_with_split(all_profiles, clusters)
 
+    # ---------------------------------------------------------------------
+    # Debug
+    # ---------------------------------------------------------------------
     def _debug_largest_clusters_with_split(
         self, all_profiles: List[Dict[str, Any]], clusters: List[Set[int]]
     ) -> None:
         clusters_sorted = sorted(clusters, key=len, reverse=True)
         top_n = min(self.debug_top_n_clusters, len(clusters_sorted))
 
-        logger.info(
-            "--- TOP %d LARGEST CONNECTED COMPONENTS (Before DOB split) ---",
-            top_n,
-        )
+        logger.info("--- TOP %d LARGEST CONNECTED COMPONENTS (Before DOB split) ---", top_n)
 
         for i in range(top_n):
-            c_indices = list(clusters_sorted[i])
+            c_indices = sorted(list(clusters_sorted[i]))
 
             names: List[str] = []
             sources: Set[str] = set()
@@ -196,7 +212,6 @@ class EntityResolver:
 
                             d = obj.get("data")
                             if isinstance(d, dict):
-                                # Ensure nationality fields are normalized as ISO2
                                 normalize_country_fields_in_profile(d)
 
                             profiles.append(obj)
@@ -218,35 +233,10 @@ class EntityResolver:
     _WS_RE = re.compile(r"\s+", re.UNICODE)
 
     _NAME_STOPWORDS = {
-        "al",
-        "el",
-        "as",
-        "ash",
-        "ad",
-        "at",
-        "ar",
-        "az",
-        "abu",
-        "umm",
-        "um",
-        "bin",
-        "ibn",
-        "bint",
-        "ben",
-        "b",
-        "st",
-        "saint",
-        "de",
-        "del",
-        "da",
-        "di",
-        "la",
-        "le",
-        "the",
-        "of",
-        "abd",
-        "abdel",
-        "abdul",
+        "al", "el", "as", "ash", "ad", "at", "ar", "az",
+        "abu", "umm", "um", "bin", "ibn", "bint", "ben",
+        "b", "st", "saint", "de", "del", "da", "di",
+        "la", "le", "the", "of", "abd", "abdel", "abdul",
     }
 
     def _norm_text(self, s: str) -> str:
@@ -285,6 +275,20 @@ class EntityResolver:
             return doublemetaphone(token)[0] or ""
         except Exception:
             return ""
+
+    # ---------------------------------------------------------------------
+    # Deterministic sorting helpers (to avoid false UPDATED)
+    # ---------------------------------------------------------------------
+    def _json_key(self, x: Any) -> str:
+        try:
+            return json.dumps(x, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        except Exception:
+            return str(x)
+
+    def _stable_sort_list(self, items: List[Any]) -> List[Any]:
+        if not isinstance(items, list) or not items:
+            return items if isinstance(items, list) else []
+        return sorted(items, key=self._json_key)
 
     # ---------------------------------------------------------------------
     # Blocking utilities
@@ -456,7 +460,6 @@ class EntityResolver:
             if len(indices) < 2:
                 continue
 
-            # Down-block large buckets for certain key types
             if len(indices) > self.max_block_size:
                 if key.startswith(("fp:", "afp:", "tok:")):
                     downblocked_blocks += 1
@@ -492,7 +495,6 @@ class EntityResolver:
                                     G.add_edge(idx_a, idx_b)
                 continue
 
-            # Regular within-block comparisons
             for a in range(len(indices)):
                 for b in range(a + 1, len(indices)):
                     idx_a, idx_b = indices[a], indices[b]
@@ -685,105 +687,6 @@ class EntityResolver:
 
         return groups
 
-    def _compute_profile_hash(self, out_obj: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Calculates a deterministic MD5 hash based strictly on BUSINESS DATA.
-        Uses an ALLOWLIST to ignore all metadata, timestamps, or system IDs.
-        
-        This hash is used for Delta detection (Change Data Capture).
-        """
-        data = out_obj.get("data", {})
-        datasets = out_obj.get("datasets", [])
-
-        # 1. DEFINE THE ALLOWLIST
-        # Only fields in this set contribute to the hash.
-        BUSINESS_KEYS = {
-            # --- Identity ---
-            "firstName", "middleName", "lastName", "fullName",
-            "gender", "isDeceased", "isDeleted",
-            "nameAliases", "aliases",
-            "datesOfBirthIso", "datesOfBirthParsed",
-            "datesOfDeathIso",
-            "nationalitiesIsoCodes", "nationality",
-            "profileImages",
-            
-            # --- Contact / Locality ---
-            "addresses", "contactEntries",
-            
-            # --- Risk & Crime Data ---
-            "sanEntries",
-            "pepEntries",
-            "relEntries", "rreEntries", "poiEntries",
-            "insEntries", "ddEntries", "griEntries",
-            "pepByAssociationEntries",
-            
-            # --- Evidence & Context ---
-            "notes",
-            "evidences",
-            "identifiers",
-            
-            # --- Links ---
-            "individualLinks", "businessLinks"
-        }
-
-        # Keys to strip from nested dictionaries (Metadata inside business objects)
-        VOLATILE_INNER_KEYS = {"captureDateIso", "scraped_at", "originalUrl", "assetUrl"}
-
-        # 2. Recursive Cleaner
-        # - Keeps only non-volatile keys
-        # - Converts SETS to sorted LISTS (Crucial: sets are not JSON serializable)
-        def recursive_clean(obj):
-            if isinstance(obj, dict):
-                return {
-                    k: recursive_clean(v) 
-                    for k, v in obj.items() 
-                    if k not in VOLATILE_INNER_KEYS
-                }
-            elif isinstance(obj, list):
-                return [recursive_clean(x) for x in obj]
-            elif isinstance(obj, set):
-                # SAFETY FIX: Sets are unordered and not valid JSON. 
-                # Convert to sorted list immediately.
-                return [recursive_clean(x) for x in sorted(list(obj), key=str)]
-            return obj
-
-        # 3. Build the Hashable Structure
-        hashable_root = {}
-        
-        # A. Add Business Data (Filtered by Allowlist)
-        for k, v in data.items():
-            if k in BUSINESS_KEYS:
-                hashable_root[k] = recursive_clean(v)
-        
-        # B. Add Datasets (Crucial: If a person moves from "Warning" to "Sanction" list, hash must change)
-        # We prefix with underscore to avoid collision with data keys
-        hashable_root["_datasets"] = sorted(list(datasets))
-
-        # 4. Recursive Sorter (Determinism)
-        # JSON is unordered. We must enforce strict ordering of keys and lists
-        # to ensure the same data always results in the exact same hash.
-        def recursive_sort(obj):
-            if isinstance(obj, dict):
-                # Sort dictionaries by key
-                return {k: recursive_sort(v) for k, v in sorted(obj.items())}
-            if isinstance(obj, list):
-                # Sort lists by their JSON string representation
-                return sorted(
-                    [recursive_sort(x) for x in obj], 
-                    key=lambda x: json.dumps(x, sort_keys=True, ensure_ascii=False)
-                )
-            return obj
-
-        hashable_sorted = recursive_sort(hashable_root)
-
-        # 5. Hash Generation
-        # dump to string -> encode to bytes -> md5 -> hex string
-        json_str = json.dumps(hashable_sorted, sort_keys=True, ensure_ascii=False)
-        content_hash = hashlib.md5(json_str.encode("utf-8")).hexdigest()
-        
-        return content_hash
-    
-    
     # ---------------------------------------------------------------------
     # Merge cluster into Golden Record (keeps your schema shape)
     # ---------------------------------------------------------------------
@@ -800,7 +703,7 @@ class EntityResolver:
             "lastName": "",
             "gender": None,
             "provider": self.provider,
-            "provider_version": now_ms,
+            "provider_version": now_ms,  # changes every run (excluded from delta hashing)
             "isDeleted": False,
             "isDeceased": False,
             "nationality": [],
@@ -859,9 +762,15 @@ class EntityResolver:
             else:
                 dst.append(src)
 
+        # IMPORTANT: profiles already come in deterministic order from run()
         for p in profiles:
             d = p.get("data", {}) if isinstance(p, dict) else {}
-            final_datasets_list.update(p.get("datasets") or [])
+
+            ds_list = p.get("datasets") or []
+            if isinstance(ds_list, list):
+                for x in ds_list:
+                    if isinstance(x, str) and x.strip():
+                        final_datasets_list.add(x.strip())
 
             _vote(full_name_votes, d.get("fullName"))
             _vote(first_votes, d.get("firstName"))
@@ -956,6 +865,7 @@ class EntityResolver:
             merged["nameAliases"].remove(merged["fullName"])
 
         merged["nameAliases"] = [{"fullName": n} for n in sorted(merged["nameAliases"]) if n]
+
         merged["aliases"] = all_struct_aliases
         merged["addresses"] = all_addresses
         merged["datesOfBirthParsed"] = all_dob_parsed
@@ -970,8 +880,43 @@ class EntityResolver:
 
         merged["nationality"] = list(merged["nationalitiesIsoCodes"])
 
-        dob_seed = merged["datesOfBirthIso"][0] if merged["datesOfBirthIso"] else "NODOB"
-        id_seed = f"{merged['fullName']}:{dob_seed}".strip()
+        # -----------------------------------------------------------------
+        # Deep stable sort for all list-like fields
+        # This prevents false UPDATED due to ordering differences
+        # -----------------------------------------------------------------
+        merged["aliases"] = self._stable_sort_list(merged.get("aliases") or [])
+        merged["addresses"] = self._stable_sort_list(merged.get("addresses") or [])
+        merged["datesOfBirthParsed"] = self._stable_sort_list(merged.get("datesOfBirthParsed") or [])
+        merged["notes"] = self._stable_sort_list(merged.get("notes") or [])
+        merged["contactEntries"] = self._stable_sort_list(merged.get("contactEntries") or [])
+        merged["identifiers"] = self._stable_sort_list(merged.get("identifiers") or [])
+        merged["evidences"] = self._stable_sort_list(merged.get("evidences") or [])
+
+        merged["sanEntries"]["current"] = self._stable_sort_list(merged["sanEntries"].get("current") or [])
+        merged["sanEntries"]["former"] = self._stable_sort_list(merged["sanEntries"].get("former") or [])
+        merged["pepEntries"]["current"] = self._stable_sort_list(merged["pepEntries"].get("current") or [])
+        merged["pepEntries"]["former"] = self._stable_sort_list(merged["pepEntries"].get("former") or [])
+
+        for k in [
+            "relEntries",
+            "rreEntries",
+            "poiEntries",
+            "insEntries",
+            "ddEntries",
+            "pepByAssociationEntries",
+            "individualLinks",
+            "businessLinks",
+            "griEntries",
+        ]:
+            merged[k] = self._stable_sort_list(merged.get(k) or [])
+
+        # -----------------------------------------------------------------
+        # Stable resourceId generation (normalized name + DOB-year seed)
+        # -----------------------------------------------------------------
+        norm_name = self._norm_text(merged.get("fullName") or "")
+        years = sorted(self._extract_years(merged.get("datesOfBirthIso") or []))
+        dob_seed = years[0] if years else "NODOB"
+        id_seed = f"{norm_name}:{dob_seed}".strip()
         res_id = hashlib.sha256(id_seed.encode("utf-8")).hexdigest()
 
         merged["resourceId"] = res_id
@@ -979,7 +924,7 @@ class EntityResolver:
         merged["qrCode"] = res_id[:10]
 
         merged["provider"] = self.provider
-        merged["provider_version"] = int(time.time() * 1000)
+        merged["provider_version"] = int(time.time() * 1000)  # volatile (excluded from delta hashing)
 
         conflicts: Dict[str, Any] = {}
         if len(gender_values) > 1:
@@ -997,140 +942,254 @@ class EntityResolver:
         return out_obj
 
     # ---------------------------------------------------------------------
-    # Output
+    # DELTA helpers: state + hashing
+    # ---------------------------------------------------------------------
+    def _state_path(self) -> Path:
+        return self.output_dir / self.state_file
+
+    def _load_state(self) -> Dict[str, Any]:
+        path = self._state_path()
+        if not path.exists():
+            return {"version": self.STATE_VERSION, "provider": self.provider, "golden_hashes": {}}
+
+        try:
+            obj = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(obj, dict):
+                raise ValueError("State is not a JSON object")
+
+            hashes = obj.get("golden_hashes")
+            if not isinstance(hashes, dict):
+                hashes = {}
+
+            return {
+                "version": obj.get("version", self.STATE_VERSION),
+                "provider": obj.get("provider", self.provider),
+                "golden_hashes": hashes,
+            }
+        except Exception as e:
+            logger.warning("Failed to load state file '%s': %s. Rebuilding state from scratch.", path, e)
+            return {"version": self.STATE_VERSION, "provider": self.provider, "golden_hashes": {}}
+
+    def _save_state(self, golden_hashes: Dict[str, str], collisions: int = 0) -> None:
+        path = self._state_path()
+        body = {
+            "version": self.STATE_VERSION,
+            "provider": self.provider,
+            "exported_at_iso": datetime.now(timezone.utc).isoformat(),
+            "records": len(golden_hashes),
+            "collisions": collisions,
+            "golden_hashes": golden_hashes,
+        }
+        path.write_text(json.dumps(body, indent=2, ensure_ascii=False), encoding="utf-8")
+        logger.info("Saved DELTA state to: %s", path)
+
+    def _canonical_for_hash(self, out_obj: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Full-profile canonical representation for hashing.
+        Any real change anywhere in the merged record => hash changes => UPDATED.
+
+        We only exclude volatile runtime fields (e.g. provider_version).
+        """
+        obj = deepcopy(out_obj)
+
+        # Optional exclusions at top-level (rare)
+        for k in self.excluded_top_fields_for_hash:
+            obj.pop(k, None)
+
+        d = obj.get("data")
+        if isinstance(d, dict):
+            for k in self.excluded_data_fields_for_hash:
+                d.pop(k, None)
+
+        return obj
+
+    def _hash_golden(self, out_obj: Dict[str, Any]) -> str:
+        """
+        Deterministic sha256 hash of the FULL merged profile (canonicalized).
+        """
+        canonical = self._canonical_for_hash(out_obj)
+        s = json.dumps(canonical, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        return hashlib.sha256(s.encode("utf-8")).hexdigest()
+
+    # ---------------------------------------------------------------------
+    # Output (FULL + DELTA)
     # ---------------------------------------------------------------------
     def _save_final_output(self, merged_results: List[Dict[str, Any]]) -> None:
-        """
-        Saves the resolved Golden Records to disk.
-        1. Loads previous hash state (if available).
-        2. Calculates robust content hashes for all new profiles.
-        3. Identifies DELTAS (changes vs previous state).
-        4. Writes FULL export (all records).
-        5. Writes DELTA export (changed records only).
-        6. Persists new hash state for the next run.
-        7. Generates Provider Metadata.
-        """
         self.output_dir.mkdir(parents=True, exist_ok=True)
+        now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H")
+        # Normalize output file naming
+        out_file =  f"{self.provider}_{now_iso}_FULL"
+        if not out_file.lower().endswith(".jsonl"):
+            out_file = out_file.rsplit(".", 1)[0] + ".jsonl"
 
-        # ---------------------------------------------------------
-        # 1. Setup Files & Load State
-        # ---------------------------------------------------------
-        full_out_filename = self.output_file
-        if not full_out_filename.lower().endswith(".jsonl"):
-            full_out_filename = full_out_filename.rsplit(".", 1)[0] + ".jsonl"
-            
-        full_gz_path = self.output_dir / (full_out_filename + ".gz")
-        delta_gz_path = self.output_dir / "Delta_Export.jsonl.gz"
+        full_jsonl_path = self.output_dir / out_file
+        full_gz_path = Path(str(full_jsonl_path) + ".gz")
 
-        old_hashes: Dict[str, str] = {}
-        if self.state_file.exists():
-            try:
-                logger.info("Loading previous resolution state from: %s", self.state_file)
-                with self.state_file.open("r", encoding="utf-8") as f:
-                    old_hashes = json.load(f)
-            except Exception as e:
-                logger.warning("Failed to load state file (forcing full delta): %s", e)
+        # Build current hashes while writing FULL
+        total_full = 0
+        all_datasets_full: Set[str] = set()
+        current_hashes: Dict[str, str] = {}
 
-        # ---------------------------------------------------------
-        # 2. Process Records (Hash & Identify Deltas)
-        # ---------------------------------------------------------
-        delta_records: List[Dict[str, Any]] = []
-        new_hashes: Dict[str, str] = {}
-        all_datasets: Set[str] = set()
-        total_records = 0
+        collisions = 0
+        collision_samples: List[str] = []
 
-        # Helper to handle sets in JSON serialization
-        def set_default(o):
-            if isinstance(o, set):
-                return list(o)
-            return str(o)
-
-        logger.info("Writing Full Export and calculating Deltas...")
-
-        # We write the Full Export stream immediately to save memory
-        with gzip.open(full_gz_path, "wt", encoding="utf-8") as f_full:
+        with gzip.open(full_gz_path, "wt", encoding="utf-8") as f_gz:
             for item in merged_results:
                 if not isinstance(item, dict):
                     continue
-                
-                # A. Inject Robust Hash 
-                curr_hash = self._compute_profile_hash(item)
 
-                data = item.get("data", {})
-                rid = data.get("resourceId")
-
-                # Track datasets for metadata
                 ds = item.get("datasets")
                 if isinstance(ds, list):
-                    all_datasets.update([x for x in ds if isinstance(x, str)])
+                    all_datasets_full.update([x for x in ds if isinstance(x, str)])
 
-                # B. Delta Detection
-                if rid and curr_hash:
-                    # Save this hash to the new state map
-                    new_hashes[rid] = curr_hash
+                d = item.get("data")
+                if not isinstance(d, dict):
+                    continue
 
-                    # Check if Changed (Upsert) or New (Insert)
-                    # If rid wasn't in old_hashes, it's new.
-                    # If rid is in old_hashes but hash differs, it's an update.
-                    if rid not in old_hashes or old_hashes[rid] != curr_hash:
-                        delta_records.append(item)
+                rid = d.get("resourceId")
+                if isinstance(rid, str) and rid:
+                    # Full-profile hash (post-merge)
+                    new_hash = self._hash_golden(item)
 
-                # C. Write to Full Export
-                f_full.write(json.dumps(item, ensure_ascii=False, default=set_default) + "\n")
-                total_records += 1
+                    # Collision detection: same resourceId appears multiple times
+                    if rid in current_hashes and current_hashes[rid] != new_hash:
+                        collisions += 1
+                        if len(collision_samples) < 10:
+                            collision_samples.append(rid)
 
-        logger.info("Saved FULL Export (%d records) to: %s", total_records, full_gz_path)
+                    current_hashes[rid] = new_hash
 
-        # ---------------------------------------------------------
-        # 3. Write Delta Export
-        # ---------------------------------------------------------
-        with gzip.open(delta_gz_path, "wt", encoding="utf-8") as f_delta:
-            for item in delta_records:
-                f_delta.write(json.dumps(item, ensure_ascii=False, default=set_default) + "\n")
+                line = json.dumps(item, ensure_ascii=False, sort_keys=False, separators=(",", ":"))
+                f_gz.write(line + "\n")
+                total_full += 1
 
-        logger.info("Saved DELTA Export (%d records) to: %s", len(delta_records), delta_gz_path)
+        logger.info("Saved FULL export: %d Golden Records -> %s", total_full, full_gz_path)
 
-        # ---------------------------------------------------------
-        # 4. Persist New State
-        # ---------------------------------------------------------
-        try:
-            with self.state_file.open("w", encoding="utf-8") as f_state:
-                json.dump(new_hashes, f_state)
-            logger.info("Persisted resolution state hashes to: %s", self.state_file)
-        except Exception as e:
-            logger.error("Failed to save resolution state: %s", e)
+        if collisions:
+            logger.warning("resourceId collisions detected: %d (sample=%s)", collisions, collision_samples)
 
-        # ---------------------------------------------------------
-        # 5. Generate Provider Metadata
-        # ---------------------------------------------------------
-        # Calculate SHA256 of the FULL .jsonl.gz file for integrity verification
-        sha256 = hashlib.sha256()
+        # sha256 of FULL .jsonl.gz
+        full_sha256 = hashlib.sha256()
         with full_gz_path.open("rb") as rf:
             for chunk in iter(lambda: rf.read(1024 * 1024), b""):
-                sha256.update(chunk)
-        gz_sha256 = sha256.hexdigest()
+                full_sha256.update(chunk)
+        full_gz_sha256 = full_sha256.hexdigest()
 
-        provider_body_path = self.output_dir / f"{self.provider}_meta.json"
-        
-        provider_body = {
-            "sha256": gz_sha256,
+        full_meta_path = self.output_dir / f"{self.provider}_meta.json"
+        full_meta = {
+            "sha256": full_gz_sha256,
             "file": str(full_gz_path.name),
             "format": "jsonl.gz",
-            "records": total_records,
+            "records": total_full,
             "exported_at_iso": datetime.now(timezone.utc).isoformat(),
-            "datasets": sorted(all_datasets),
+            "datasets": sorted(all_datasets_full),
             "source_dir": str(self.processed_dir),
             "max_block_size": self.max_block_size,
-            # Delta metadata used by Provider to decide whether to run 'insert' or 'update'
-            "delta": {
-                "file": str(delta_gz_path.name),
-                "records": len(delta_records),
-                "strategy": "hash_diff"
-            }
+            "hashing": {
+                "algorithm": "sha256",
+                "excluded_data_fields": self.excluded_data_fields_for_hash,
+            },
+            "collisions": {
+                "count": collisions,
+                "sample_ids": collision_samples,
+            },
         }
+        full_meta_path.write_text(json.dumps(full_meta, indent=2, ensure_ascii=False), encoding="utf-8")
+        logger.info("Saved FULL metadata -> %s", full_meta_path)
 
-        provider_body_path.write_text(
-            json.dumps(provider_body, indent=2, ensure_ascii=False), 
-            encoding="utf-8"
+        # -----------------------------
+        # DELTA (NEW + UPDATED only)
+        # -----------------------------
+        if not self.enable_delta:
+            return
+
+        previous_state = self._load_state()
+        previous_hashes = previous_state.get("golden_hashes") or {}
+        if not isinstance(previous_hashes, dict):
+            previous_hashes = {}
+
+        delta_items: List[Dict[str, Any]] = []
+        total_new = 0
+        total_updated = 0
+        all_datasets_delta: Set[str] = set()
+
+        for item in merged_results:
+            if not isinstance(item, dict):
+                continue
+
+            d = item.get("data")
+            if not isinstance(d, dict):
+                continue
+
+            rid = d.get("resourceId")
+            if not isinstance(rid, str) or not rid:
+                continue
+
+            new_hash = current_hashes.get(rid)
+            if not isinstance(new_hash, str) or not new_hash:
+                continue
+
+            old_hash = previous_hashes.get(rid)
+
+            if old_hash is None:
+                delta_items.append(item)
+                total_new += 1
+            elif old_hash != new_hash:
+                delta_items.append(item)
+                total_updated += 1
+
+            ds = item.get("datasets")
+            if isinstance(ds, list):
+                all_datasets_delta.update([x for x in ds if isinstance(x, str)])
+ #####               
+        out_file_delta =f"{self.provider}_{now_iso}_DELTA"  
+        if not out_file_delta.lower().endswith(".jsonl"):
+            out_file_delta = out_file_delta.rsplit(".", 1)[0] + ".jsonl"        
+        delta_jsonl_path = self.output_dir / out_file_delta
+        delta_gz_path = Path(str(delta_jsonl_path) + ".gz")
+
+        total_delta = 0
+        with gzip.open(delta_gz_path, "wt", encoding="utf-8") as f_gz:
+            for item in delta_items:
+                line = json.dumps(item, ensure_ascii=False, sort_keys=False, separators=(",", ":"))
+                f_gz.write(line + "\n")
+                total_delta += 1
+
+        # sha256 of DELTA .jsonl.gz
+        delta_sha256 = hashlib.sha256()
+        with delta_gz_path.open("rb") as rf:
+            for chunk in iter(lambda: rf.read(1024 * 1024), b""):
+                delta_sha256.update(chunk)
+        delta_gz_sha256 = delta_sha256.hexdigest()
+
+        delta_meta_path = self.output_dir / f"{self.provider}_delta_meta.json"
+        delta_meta = {
+            "sha256": delta_gz_sha256,
+            "file": str(delta_gz_path.name),
+            "format": "jsonl.gz",
+            "records": total_delta,
+            "new_records": total_new,
+            "updated_records": total_updated,
+            "exported_at_iso": datetime.now(timezone.utc).isoformat(),
+            "datasets": sorted(all_datasets_delta),
+            "state_file": str(self._state_path().name),
+            "full_file": str(full_gz_path.name),
+            "hashing": {
+                "algorithm": "sha256",
+                "excluded_data_fields": self.excluded_data_fields_for_hash,
+                "note": "Full-profile hash AFTER merge. Any change anywhere => UPDATED.",
+            },
+        }
+        delta_meta_path.write_text(json.dumps(delta_meta, indent=2, ensure_ascii=False), encoding="utf-8")
+
+        logger.info(
+            "Saved DELTA export: %d records (NEW=%d, UPDATED=%d) -> %s",
+            total_delta,
+            total_new,
+            total_updated,
+            delta_gz_path,
         )
-        logger.info("Saved provider metadata to: %s", provider_body_path)
+        logger.info("Saved DELTA metadata -> %s", delta_meta_path)
+
+        # Finally, update the state for the next run
+        self._save_state(current_hashes, collisions=collisions)

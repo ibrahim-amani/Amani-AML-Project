@@ -15,8 +15,8 @@ import networkx as nx
 from metaphone import doublemetaphone
 from rapidfuzz import fuzz
 
-from sanction_parser.core.config import settings
-from sanction_parser.scrapers.utils.nat_to_iso import (
+from amani_aml.core.config import settings
+from amani_aml.utils.nat_to_iso import (
     normalize_country_fields_in_profile,
     normalize_nationalities,
 )
@@ -694,6 +694,8 @@ class EntityResolver:
         now_ms = int(time.time() * 1000)
 
         merged: Dict[str, Any] = {
+            "contract_version":settings.CONTRACT_VERSION,
+            "schema_version":settings.SCEMA_VERSION,
             "qrCode": "",
             "resourceUri": "",
             "resourceId": "",

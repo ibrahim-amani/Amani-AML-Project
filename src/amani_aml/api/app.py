@@ -58,7 +58,6 @@ def _read_json(path: Path) -> Dict[str, Any]:
 
 
 def _safe_parse_iso_to_ms(iso_str: str) -> int:
-    # meta["exported_at_iso"] غالباً فيه timezone already، بس نعمل fallback
     dt = datetime.fromisoformat(iso_str)
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)

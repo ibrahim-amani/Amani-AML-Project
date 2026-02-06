@@ -172,10 +172,14 @@ Amani-AML-Project
 
 ##  Configuration
 
-Edit `src/amani_aml/config.py` to control:
+run this command
+```bash
+cp .env.example .env
+```
+Edit `.env` to control:
 
 * `DATA_LAKE_DIR`
-* `SANCTIONS_CONCURRENCY
+* `SANCTIONS_CONCURRENCY`
 ---
 
 ##  Quick Smoke Test
